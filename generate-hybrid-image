@@ -1,0 +1,156 @@
+#!/usr/bin/env bash
+
+next-free-path ()
+{
+    local base=$1
+
+    local next=$base
+    local -i i=0
+
+    while test -e "$next"; do
+        next=${base}$(( ++i ))
+    done
+
+    echo "$next"
+}
+
+allocate-image ()
+{
+    local dest_image=$1
+    local src_image=$2
+
+    local -i src_size=0
+
+    src_size=$(stat --format=%s "$src_image") || return $?
+    dd if=/dev/zero of="$dest_image" bs="$src_size" seek=1 count=0 || return $?
+}
+
+duplicate-partition-table ()
+{
+    local src_image=$1
+    local dest_image=$2
+
+    sfdisk --dump "$src_image" |
+        sfdisk --wipe=always "$dest_image" || return $?
+}
+
+loop-attach-image ()
+{
+    local image=$1
+
+    local loop_device=''
+
+    loop_device=$(sudo losetup --nooverlap --find --show "$image") || return $?
+    sudo partprobe "$loop_device" || return $?
+    sleep 2
+
+    echo "$loop_device"
+}
+
+format-and-mount-device ()
+{
+    local loop_device=$1
+    local mount_basedir=$2
+    local -n _mount_points=$3
+    local -n _partition_nos=$4
+    local -n _partition_labels=$5
+
+    local mount_point=''
+    local -i i=0
+
+    # Format and mount partitions
+    for i in ${_partition_nos[*]}; do
+        if test ! -e "${loop_device}p${i}"; then
+            echo "${loop_device}p${i}: No such file or directory" >&2
+            sudo losetup -d "$loop_device" || true
+            rm -f "$hybrid_img"
+            return 1
+        fi
+        case $i in
+            1) format_cmd='mkfs.vfat -n' ;;
+            *) format_cmd='mkfs.ext4 -L' ;;
+        esac
+
+        sudo $format_cmd  "${_partition_labels[i - 1]}" "${loop_device}p${i}" || return $?
+        mount_point=$(next-free-path "${mount_basedir}/${_partition_labels[i - 1]}")
+        sudo mkdir -p "$mount_point" || return $?
+        sudo mount "${loop_device}p${i}" "$mount_point" || return $?
+        _mount_points+=( "$mount_point" )
+    done
+}
+
+add-boot-blocks ()
+{
+    local loop_device=$1
+    local spl_mmc=$2
+    local uboot_mmc=$3
+
+    sudo dd if="$spl_mmc" of="$loop_device" bs=1K seek=1 || return $?
+    sudo dd if="$uboot_mmc" of="$loop_device" bs=1K seek=69 || return $?
+}
+
+mount-image ()
+{
+    local image=$1
+    local -n mount_points=$2
+
+    mount.image "$image" |
+        mapfile -t mount_points || return $?
+}
+
+copy-file-systems ()
+{
+    local -n source_mount_points=$1
+    local -n destination_mount_points=$2
+
+    local -i i=0
+
+    for i in ${!source_mount_points[*]}; do
+        cat >&2 <<EOF
+sudo tar -C "${source_mount_points[i]}" -cf - . |
+    sudo tar -C "${destination_mount_points[i]}" -xf -
+EOF
+        sudo tar -C "${source_mount_points[i]}" -cf - . |
+            sudo tar -C "${destination_mount_points[i]}" -xf -
+    done
+}
+
+
+if test ."$0" = ."${BASH_SOURCE[0]}"; then
+    set -o pipefail
+    shopt -s lastpipe
+
+    declare build_basedir=/opt/src/revo
+    declare images_dir=${build_basedir}/MIW/images
+
+    declare hybrid_img=${1:-"${images_dir}/hybrid.wic"}
+    declare miw_img=${2:-"${images_dir}/miw-msom-image-devel_3.0.1.wic"}
+
+    declare releases_dir=${build_basedir}/releases/roadrunner/
+    declare build_products_dir=${releases_dir}/roadrunner-5.4.142_20230910T081459Z/output
+
+    declare spl_mmc=${build_products_dir}/SPL.mmc
+    declare uboot_mmc=${build_products_dir}/u-boot.img.mmc
+
+    declare -a partition_labels=( boot root recovery _ updates app data )
+    declare -a partition_nos=( {1..3} {5..7} )
+
+    declare mount_basedir="/media/$USER"
+    declare loop_device=''
+
+    declare -a hybrid_mount_points=()
+    declare -a miw_mount_points=()
+
+    rm -f "$hybrid_img"
+
+    allocate-image "$hybrid_img" "$miw_img" || exit $?
+    duplicate-partition-table "$miw_img" "$hybrid_img" || exit $?
+    loop_device=$(loop-attach-image "$hybrid_img") || exit $?
+    format-and-mount-device "$loop_device" "$mount_basedir" hybrid_mount_points \
+                            partition_nos partition_labels || exit $?
+    add-boot-blocks "$loop_device" "$spl_mmc" "$uboot_mmc" || exit $?
+    mount-image "$miw_img" miw_mount_points || exit $?
+    copy-file-systems miw_mount_points hybrid_mount_points || exit $?
+    umount.image "$miw_img" || exit $?
+    umount.image "$hybrid_img" || exit $?
+fi
