@@ -329,7 +329,7 @@ if test ."$0" = ."${BASH_SOURCE[0]}"; then
         debian|ubuntu) enable-qemu-arm || exit $? ;;
     esac
 
-    load-configuration "${machine}-${distribution}.conf" || exit $?
+    load-configuration "${script_dir}/generate-hybrid-image.conf" || exit $?
 
     declare builder_id=''
 
@@ -349,7 +349,7 @@ Builder image: ${builder_name}
 Builder ID: ${builder_id}
 Builder image: ${builder_name}
 Derived from: ${builder_image}:${builder_tag}
-Destination: ${output_dir}
+Destination: ${build_products_dir}
 ────────────────────────────────────────────────────────────────────────────────
 EOF
 

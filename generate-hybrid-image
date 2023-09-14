@@ -1,4 +1,45 @@
 #!/usr/bin/env bash
+#
+# @(#) generate-hybrid-image
+#
+# Copyright © 2023 Revolution Robotics, Inc.
+#
+# Given an existing image, this script generates a hybrid by replacing
+# the bootloader and devicetree with ones compiled from REVO
+# Roadrunner sources.
+#
+: ${CAT_CMD:='/bin/cat'}
+: ${CP_CMD:='/bin/cp'}
+: ${DD_CMD:='/bin/dd'}
+: ${HEAD_CMD:='/usr/bin/head'}
+: ${LOSETUP_CMD:='/sbin/losetup'}
+: ${LS_CMD:='/bin/ls'}
+: ${MKDIR_CMD:='/bin/mkdir'}
+: ${MKFS_VFAT_CMD:='/sbin/mkfs.vfat'}
+: ${MKFS_EXT4_CMD:='/sbin/mkfs.ext4'}
+: ${MKIMAGE_CMD:='/usr/bin/mkimage'}
+: ${MOUNT_CMD:='/sbin/mount'}
+: ${MOUNT_IMAGE_CMD:="${HOME}/bin/mount.image"}
+: ${PARTPROBE_CMD:='/sbin/partprobe'}
+: ${READLINK_CMD:='/bin/readlink'}
+: ${RM_CMD:='/bin/rm'}
+: ${SFDISK_CMD:='/sbin/sfdisk'}
+: ${SLEEP_CMD:='/bin/sleep'}
+: ${SORT_CMD:='/usr/bin/sort'}
+: ${STAT_CMD:='/usr/bin/stat'}
+: ${SUDO_CMD:='/usr/bin/sudo'}
+: ${TAR_CMD:='/bin/tar'}
+: ${UMOUNT_IMAGE_CMD:="${HOME}/bin/umount.image"}
+
+# OS-agnstoic readlink for existent files/directories.
+resolve-existing ()
+{
+    if $READLINK_CMD --version 2>&1 | $GREP_CMD -q 'coreutils'; then
+        $READLINK_CMD -e "$@"
+    else
+        $READLINK_CMD -f N "$@"
+    fi
+}
 
 next-free-path ()
 {
@@ -21,8 +62,8 @@ allocate-image ()
 
     local -i src_size=0
 
-    src_size=$(stat --format=%s "$src_image") || return $?
-    dd if=/dev/zero of="$dest_image" bs="$src_size" seek=1 count=0 || return $?
+    src_size=$($STAT_CMD --format=%s "$src_image") || return $?
+    $DD_CMD if=/dev/zero of="$dest_image" bs="$src_size" seek=1 count=0 || return $?
 }
 
 duplicate-partition-table ()
@@ -30,8 +71,8 @@ duplicate-partition-table ()
     local src_image=$1
     local dest_image=$2
 
-    sfdisk --dump "$src_image" |
-        sfdisk --wipe=always "$dest_image" || return $?
+    $SFDISK_CMD --dump "$src_image" |
+        $SFDISK_CMD --wipe=always "$dest_image" || return $?
 }
 
 loop-attach-image ()
@@ -40,9 +81,9 @@ loop-attach-image ()
 
     local loop_device=''
 
-    loop_device=$(sudo losetup --nooverlap --find --show "$image") || return $?
-    sudo partprobe "$loop_device" || return $?
-    sleep 2
+    loop_device=$($SUDO_CMD $LOSETUP_CMD --nooverlap --find --show "$image") || return $?
+    $SUDO_CMD $PARTPROBE_CMD "$loop_device" || return $?
+    $SLEEP_CMD 2
 
     echo "$loop_device"
 }
@@ -50,10 +91,17 @@ loop-attach-image ()
 format-and-mount-device ()
 {
     local loop_device=$1
-    local mount_basedir=$2
-    local -n _mount_points=$3
-    local -n _partition_nos=$4
-    local -n _partition_labels=$5
+    local -n _mount_points=$2
+    local -n _partition_nos=$3
+    local -n _partition_labels=$4
+
+    local image_mount_basedir=''
+
+    if test -d /run/media; then
+        image_mount_basedir=/run/media/$USER
+    else
+        image_mount_basedir=/media/$USER
+    fi
 
     local mount_point=''
     local -i i=0
@@ -62,31 +110,21 @@ format-and-mount-device ()
     for i in ${_partition_nos[*]}; do
         if test ! -e "${loop_device}p${i}"; then
             echo "${loop_device}p${i}: No such file or directory" >&2
-            sudo losetup -d "$loop_device" || true
-            rm -f "$hybrid_img"
+            $SUDO_CMD $LOSETUP_CMD -d "$loop_device" || true
+            $RM_CMD -f "$hybrid_img"
             return 1
         fi
         case $i in
-            1) format_cmd='mkfs.vfat -n' ;;
-            *) format_cmd='mkfs.ext4 -L' ;;
+            1) format_cmd="$MKFS_VFAT_CMD -n" ;;
+            *) format_cmd="$MKFS_EXT4_CMD -L" ;;
         esac
 
-        sudo $format_cmd  "${_partition_labels[i - 1]}" "${loop_device}p${i}" || return $?
-        mount_point=$(next-free-path "${mount_basedir}/${_partition_labels[i - 1]}")
-        sudo mkdir -p "$mount_point" || return $?
-        sudo mount "${loop_device}p${i}" "$mount_point" || return $?
+        $SUDO_CMD $format_cmd  "${_partition_labels[i - 1]}" "${loop_device}p${i}" || return $?
+        mount_point=$(next-free-path "${image_mount_basedir}/${_partition_labels[i - 1]}")
+        $SUDO_CMD $MKDIR_CMD -p "$mount_point" || return $?
+        $SUDO_CMD $MOUNT_CMD "${loop_device}p${i}" "$mount_point" || return $?
         _mount_points+=( "$mount_point" )
     done
-}
-
-add-boot-blocks ()
-{
-    local loop_device=$1
-    local spl_mmc=$2
-    local uboot_mmc=$3
-
-    sudo dd if="$spl_mmc" of="$loop_device" bs=1K seek=1 || return $?
-    sudo dd if="$uboot_mmc" of="$loop_device" bs=1K seek=69 || return $?
 }
 
 mount-image ()
@@ -94,7 +132,7 @@ mount-image ()
     local image=$1
     local -n mount_points=$2
 
-    mount.image "$image" |
+    $MOUNT_IMAGE_CMD "$image" |
         mapfile -t mount_points || return $?
 }
 
@@ -106,51 +144,95 @@ copy-file-systems ()
     local -i i=0
 
     for i in ${!source_mount_points[*]}; do
-        cat >&2 <<EOF
-sudo tar -C "${source_mount_points[i]}" -cf - . |
-    sudo tar -C "${destination_mount_points[i]}" -xf -
-EOF
-        sudo tar -C "${source_mount_points[i]}" -cf - . |
-            sudo tar -C "${destination_mount_points[i]}" -xf -
+        $SUDO_CMD $TAR_CMD -C "${source_mount_points[i]}" -cf - . |
+            $SUDO_CMD $TAR_CMD -C "${destination_mount_points[i]}" -xf -
     done
 }
 
+zimage-to-uimage ()
+{
+    local -n mount_points=$1
+
+    local z_image=${mount_points[0]}/zImage
+    local u_image=${mount_points[0]}/uImage
+    local kernel_release=$(
+        $LS_CMD ${mount_points[1]}/lib/modules/ |
+            $SORT_CMD -Vr |
+            $HEAD_CMD -1
+          ) || return $?
+
+    $SUDO_CMD $MKIMAGE_CMD -A arm -O linux -C none -T kernel -a 0x80800000 -e 0x80800000 \
+            -n "$kernel_release" -d "$z_image" "$u_image" || return $?
+    $SUDO_CMD $RM_CMD -f "$z_image"
+}
+
+add-boot-blocks ()
+{
+    local loop_device=$1
+    local parts_dir=$2
+
+    local spl_mmc=${parts_dir}/SPL.mmc
+    local uboot_mmc=${parts_dir}/u-boot.img.mmc
+
+    $SUDO_CMD $DD_CMD if="$spl_mmc" of="$loop_device" bs=1K seek=1 || return $?
+    $SUDO_CMD $DD_CMD if="$uboot_mmc" of="$loop_device" bs=1K seek=69 || return $?
+}
+
+replace-devicetree ()
+{
+    local root_mount_point=$1
+    local parts_dir=$2
+
+    $SUDO_CMD $RM_CMD -f "${root_mount_point}/"*.dtb
+    $SUDO_CMD $CP_CMD "${parts_dir}/"*.dtb "${root_mount_point}/"
+
+    $SUDO_CMD $RM_CMD -f "${root_mount_point}/"*.scr
+    $SUDO_CMD $CP_CMD "${parts_dir}/"*.scr "${root_mount_point}/"
+}
 
 if test ."$0" = ."${BASH_SOURCE[0]}"; then
     set -o pipefail
     shopt -s lastpipe
 
-    declare build_basedir=/opt/src/revo
-    declare images_dir=${build_basedir}/MIW/images
+    declare script=''
+    declare script_dir=''
 
-    declare hybrid_img=${1:-"${images_dir}/hybrid.wic"}
-    declare miw_img=${2:-"${images_dir}/miw-msom-image-devel_3.0.1.wic"}
+    script=$(resolve-existing "$0")
+    script_dir=${script%/*}
 
-    declare releases_dir=${build_basedir}/releases/roadrunner/
-    declare build_products_dir=${releases_dir}/roadrunner-5.4.142_20230910T081459Z/output
+    source ${script_dir}/build-builder-image
 
-    declare spl_mmc=${build_products_dir}/SPL.mmc
-    declare uboot_mmc=${build_products_dir}/u-boot.img.mmc
+    load-configuration "${script_dir}/generate-hybrid-image.conf" || exit $?
+
+    declare loop_device=''
 
     declare -a partition_labels=( boot root recovery _ updates app data )
     declare -a partition_nos=( {1..3} {5..7} )
 
-    declare mount_basedir="/media/$USER"
-    declare loop_device=''
-
     declare -a hybrid_mount_points=()
     declare -a miw_mount_points=()
 
-    rm -f "$hybrid_img"
+    $RM_CMD -f "$hybrid_img"
 
     allocate-image "$hybrid_img" "$miw_img" || exit $?
     duplicate-partition-table "$miw_img" "$hybrid_img" || exit $?
     loop_device=$(loop-attach-image "$hybrid_img") || exit $?
-    format-and-mount-device "$loop_device" "$mount_basedir" hybrid_mount_points \
+    format-and-mount-device "$loop_device" hybrid_mount_points \
                             partition_nos partition_labels || exit $?
-    add-boot-blocks "$loop_device" "$spl_mmc" "$uboot_mmc" || exit $?
     mount-image "$miw_img" miw_mount_points || exit $?
     copy-file-systems miw_mount_points hybrid_mount_points || exit $?
-    umount.image "$miw_img" || exit $?
-    umount.image "$hybrid_img" || exit $?
+    zimage-to-uimage hybrid_mount_points
+    "${script_dir}/container-build-parts" || exit $?
+
+    declare parts_dir=''
+
+    parts_dir=$(
+        $LS_CMD -d "${build_products_dir}/"*'/output' |
+            $SORT_CMD -Vr |
+            $HEAD_CMD -1
+                      ) || exit $?
+    add-boot-blocks "$loop_device" "$parts_dir" || exit $?
+    replace-devicetree "${hybrid_mount_points[0]}" "$parts_dir"
+    $UMOUNT_IMAGE_CMD "$miw_img" || exit $?
+    $UMOUNT_IMAGE_CMD "$hybrid_img" || exit $?
 fi
