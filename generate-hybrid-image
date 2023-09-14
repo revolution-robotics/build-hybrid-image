@@ -8,9 +8,11 @@
 # the bootloader and devicetree with ones compiled from REVO
 # Roadrunner sources.
 #
+: ${BMAPTOOL_CMD:='/usr/bin/bmaptool'}
 : ${CAT_CMD:='/bin/cat'}
 : ${CP_CMD:='/bin/cp'}
 : ${DD_CMD:='/bin/dd'}
+: ${GZIP_CMD:='/usr/bin/gzip'}
 : ${HEAD_CMD:='/usr/bin/head'}
 : ${LOSETUP_CMD:='/sbin/losetup'}
 : ${LS_CMD:='/bin/ls'}
@@ -20,6 +22,7 @@
 : ${MKIMAGE_CMD:='/usr/bin/mkimage'}
 : ${MOUNT_CMD:='/sbin/mount'}
 : ${MOUNT_IMAGE_CMD:="${HOME}/bin/mount.image"}
+: ${MV_CMD:='/bin/mv'}
 : ${PARTPROBE_CMD:='/sbin/partprobe'}
 : ${READLINK_CMD:='/bin/readlink'}
 : ${RM_CMD:='/bin/rm'}
@@ -53,6 +56,23 @@ next-free-path ()
     done
 
     echo "$next"
+}
+
+maybe-backup ()
+{
+    local image=$1
+
+    if test -f "$image"; then
+        $MV_CMD -f "$image"{,.old} || return $?
+    fi
+
+    if test -f "${image}.bmap"; then
+        $MV_CMD -f "${image}.bmap"{,.old} || return $?
+    fi
+
+    if test -f "${image}.gz"; then
+        $MV_CMD -f "${image}.gz"{,.old} || return $?
+    fi
 }
 
 allocate-image ()
@@ -183,11 +203,28 @@ replace-devicetree ()
     local root_mount_point=$1
     local parts_dir=$2
 
-    $SUDO_CMD $RM_CMD -f "${root_mount_point}/"*.dtb
-    $SUDO_CMD $CP_CMD "${parts_dir}/"*.dtb "${root_mount_point}/"
+    $SUDO_CMD $RM_CMD -f "${root_mount_point}/"*.dtb || return $?
+    $SUDO_CMD $CP_CMD "${parts_dir}/"*.dtb "${root_mount_point}/" || return $?
 
-    $SUDO_CMD $RM_CMD -f "${root_mount_point}/"*.scr
-    $SUDO_CMD $CP_CMD "${parts_dir}/"*.scr "${root_mount_point}/"
+    $SUDO_CMD $RM_CMD -f "${root_mount_point}/"*.scr || return $?
+    $SUDO_CMD $CP_CMD "${parts_dir}/"*.scr "${root_mount_point}/" || return $?
+}
+
+bmap-and-compress ()
+{
+    local image=$1
+
+    $BMAPTOOL_CMD create -o "${image}.bmap" "${image}" || return $?
+    $GZIP_CMD -c "${image}" >"${image}.gz"
+}
+
+clean-up ()
+{
+    local image1=$1
+    local image2=$2
+
+    $UMOUNT_IMAGE_CMD "$image1" || true
+    $UMOUNT_IMAGE_CMD "$image2"
 }
 
 if test ."$0" = ."${BASH_SOURCE[0]}"; then
@@ -200,7 +237,7 @@ if test ."$0" = ."${BASH_SOURCE[0]}"; then
     script=$(resolve-existing "$0")
     script_dir=${script%/*}
 
-    source ${script_dir}/build-builder-image
+    source "${script_dir}/build-builder-image"
 
     load-configuration "${script_dir}/generate-hybrid-image.conf" || exit $?
 
@@ -212,16 +249,18 @@ if test ."$0" = ."${BASH_SOURCE[0]}"; then
     declare -a hybrid_mount_points=()
     declare -a miw_mount_points=()
 
-    $RM_CMD -f "$hybrid_img"
-
+    maybe-backup "$hybrid_img"
     allocate-image "$hybrid_img" "$miw_img" || exit $?
     duplicate-partition-table "$miw_img" "$hybrid_img" || exit $?
     loop_device=$(loop-attach-image "$hybrid_img") || exit $?
+
+    trap '$UMOUNT_IMAGE_CMD "$hybrid_img" "$miw_img"; exit' 0 1 2 15
+
     format-and-mount-device "$loop_device" hybrid_mount_points \
                             partition_nos partition_labels || exit $?
     mount-image "$miw_img" miw_mount_points || exit $?
     copy-file-systems miw_mount_points hybrid_mount_points || exit $?
-    zimage-to-uimage hybrid_mount_points
+    zimage-to-uimage hybrid_mount_points || exit $?
     "${script_dir}/container-build-parts" || exit $?
 
     declare parts_dir=''
@@ -232,7 +271,9 @@ if test ."$0" = ."${BASH_SOURCE[0]}"; then
             $HEAD_CMD -1
                       ) || exit $?
     add-boot-blocks "$loop_device" "$parts_dir" || exit $?
-    replace-devicetree "${hybrid_mount_points[0]}" "$parts_dir"
-    $UMOUNT_IMAGE_CMD "$miw_img" || exit $?
-    $UMOUNT_IMAGE_CMD "$hybrid_img" || exit $?
+    replace-devicetree "${hybrid_mount_points[0]}" "$parts_dir" || exit $?
+    bmap-and-compress "$hybrid_img" || exit $?
+    clean-up  "$hybrid_img" "$miw_img"
+
+    trap - 0 1 2 15
 fi
