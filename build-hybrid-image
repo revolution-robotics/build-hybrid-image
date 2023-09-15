@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# @(#) generate-hybrid-image
+# @(#) build-hybrid-image
 #
 # Copyright © 2023 Revolution Robotics, Inc.
 #
@@ -13,6 +13,7 @@
 : ${CP_CMD:='/bin/cp'}
 : ${DD_CMD:='/bin/dd'}
 : ${GZIP_CMD:='/usr/bin/gzip'}
+: ${GREP_CMD:='/usr/bin/grep'}
 : ${HEAD_CMD:='/usr/bin/head'}
 : ${LOSETUP_CMD:='/sbin/losetup'}
 : ${LS_CMD:='/bin/ls'}
@@ -38,7 +39,7 @@
 resolve-existing ()
 {
     if $READLINK_CMD --version 2>&1 | $GREP_CMD -q 'coreutils'; then
-        $READLINK_CMD -e "$@"
+        $READLINK_CMD -e -- "$@"
     else
         $READLINK_CMD -f N "$@"
     fi
@@ -58,7 +59,7 @@ next-free-path ()
     echo "$next"
 }
 
-maybe-backup ()
+backup-image ()
 {
     local image=$1
 
@@ -181,9 +182,11 @@ zimage-to-uimage ()
             $HEAD_CMD -1
           ) || return $?
 
-    $SUDO_CMD $MKIMAGE_CMD -A arm -O linux -C none -T kernel -a 0x80800000 -e 0x80800000 \
-            -n "$kernel_release" -d "$z_image" "$u_image" || return $?
-    $SUDO_CMD $RM_CMD -f "$z_image"
+    if test -f "$z_image"; then
+        $SUDO_CMD $MKIMAGE_CMD -A arm -O linux -C none -T kernel -a 0x80800000 -e 0x80800000 \
+                  -n "$kernel_release" -d "$z_image" "$u_image" || return $?
+        $SUDO_CMD $RM_CMD -f "$z_image"
+    fi
 }
 
 add-boot-blocks ()
@@ -233,13 +236,15 @@ if test ."$0" = ."${BASH_SOURCE[0]}"; then
 
     declare script=''
     declare script_dir=''
+    declare script_name=''
 
-    script=$(resolve-existing "$0")
+    script=$(resolve-existing "$0") || exit $?
     script_dir=${script%/*}
+    script_name=${script##*/}
 
     source "${script_dir}/build-builder-image"
 
-    load-configuration "${script_dir}/generate-hybrid-image.conf" || exit $?
+    load-configuration "${script_dir}/${script_name}.conf" || exit $?
 
     declare loop_device=''
 
@@ -249,7 +254,7 @@ if test ."$0" = ."${BASH_SOURCE[0]}"; then
     declare -a hybrid_mount_points=()
     declare -a miw_mount_points=()
 
-    maybe-backup "$hybrid_img"
+    backup-image "$hybrid_img"
     allocate-image "$hybrid_img" "$miw_img" || exit $?
     duplicate-partition-table "$miw_img" "$hybrid_img" || exit $?
     loop_device=$(loop-attach-image "$hybrid_img") || exit $?

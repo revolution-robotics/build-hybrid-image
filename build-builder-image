@@ -4,23 +4,19 @@
 #
 # Copyright © 2021-2023 Revolution Robotics, Inc.
 #
-: ${APT_CMD:='/usr/bin/apt'}
 : ${AWK_CMD:='/usr/bin/gawk'}
 : ${BUILDAH_CMD:='/usr/bin/buildah'}
 : ${CAT_CMD:='/bin/cat'}
 : ${CHMOD_CMD:='/bin/chmod'}
 : ${CHROOT_CMD:='/usr/sbin/chroot'}
 : ${CP_CMD:='/bin/cp'}
-: ${DF_CMD:='/bin/df'}
 : ${FINDMNT_CMD:='/bin/findmnt'}
 : ${GIT_CMD:='/usr/bin/git'}
+: ${GREP_CMD:='/usr/bin/grep'}
 : ${HEAD_CMD:='/usr/bin/head'}
 : ${INSTALL_CMD:='/usr/bin/install'}
 : ${IP_CMD:='/sbin/ip'}
-: ${JQ_CMD:='/usr/bin/jq'}
-: ${MKDIR_CMD:='/bin/mkdir'}
 : ${MOUNT_CMD:='/bin/mount'}
-: ${MV_CMD:='/bin/mv'}
 : ${NMCLI_CMD:='/usr/bin/nmcli'}
 : ${PODMAN_CMD:='/usr/bin/podman'}
 : ${READLINK_CMD:='/bin/readlink'}
@@ -44,6 +40,16 @@ pr-info ()
 pr-err ()
 {
     printf "I: %s\n" "$@" >&2
+}
+
+# OS-agnstoic readlink for existent files/directories.
+resolve-existing ()
+{
+    if $READLINK_CMD --version 2>&1 | $GREP_CMD -q 'coreutils'; then
+        $READLINK_CMD -e -- "$@"
+    else
+        $READLINK_CMD -f N "$@"
+    fi
 }
 
 load-configuration ()
@@ -207,32 +213,40 @@ build-builder ()
 EOF
 
     $SUDO_CMD $TEE_CMD -a "${mount_point}/install-prerequisites" >/dev/null <<'EOS'
+: ${APT_CMD:='/usr/bin/apt'}
+: ${BASH_CMD:='/bin/bash'}
+: ${CAT_CMD:='/bin/cat'}
+: ${CHMOD_CMD:='/bin/chmod'}
+: ${CURL_CMD:='/usr/bin/curl'}
+: ${GPG_CMD:='/usr/bin/gpg'}
+: ${RM_CMD:='/bin/rm'}
+: ${USERADD_CMD:='/usr/sbin/useradd'}
 
 install-packages ()
 {
     local policy=/usr/sbin/policy-rc.d
     local proxy=/etc/apt/apt.conf.d/10acng-proxy
 
-    trap 'rm -f "$policy"' 0 1 2 15 RETURN
+    trap '$RM_CMD -f "$policy"' 0 1 2 15 RETURN
 
-    cat >"$policy" <<EOF
+    $CAT_CMD >"$policy" <<EOF
 #!/bin/sh
 exit 101
 EOF
-    chmod 0755 "$policy"
+    $CHMOD_CMD 0755 "$policy"
 
-    apt update
-    DEBIAN_FRONTEND=noninteractive apt -qy install curl gawk iproute2
-    apt -qy remove --purge mawk
+    $APT_CMD update
+    DEBIAN_FRONTEND=noninteractive $APT_CMD -qy install curl gawk iproute2
+    $APT_CMD -qy remove --purge mawk
 
     if test ."$HOST_GW_IPV4" != .'' &&
-            curl "${HOST_GW_IPV4}:3142" &>/dev/null; then
-        cat >"$proxy" <<EOF
+            $CURL_CMD "${HOST_GW_IPV4}:3142" &>/dev/null; then
+        $CAT_CMD >"$proxy" <<EOF
 Acquire::http::Proxy "http://${HOST_GW_IPV4}:3142";
 EOF
     fi
 
-    DEBIAN_FRONTEND=noninteractive apt -qy install autoconf automake          \
+    DEBIAN_FRONTEND=noninteractive $APT_CMD -qy install autoconf automake          \
         autopoint bc binfmt-support binutils bison build-essential            \
         cmake coreutils debootstrap device-tree-compiler devscripts           \
         dpkg-dev ed fakeroot flex g++ gcc gettext git gpg groff               \
@@ -242,28 +256,28 @@ EOF
         qemu-user-static rsync sudo u-boot-tools unzip upx-ucl vim            \
         xz-utils zip
 
-    apt -qy install binutils-arm-linux-gnueabihf
-    apt -qy install cpp-arm-linux-gnueabihf
-    apt -qy install gcc-arm-linux-gnueabihf
-    apt -qy install g++-arm-linux-gnueabihf
+    $APT_CMD -qy install binutils-arm-linux-gnueabihf
+    $APT_CMD -qy install cpp-arm-linux-gnueabihf
+    $APT_CMD -qy install gcc-arm-linux-gnueabihf
+    $APT_CMD -qy install g++-arm-linux-gnueabihf
 
-    curl -sLo /usr/bin/install-smallstep \
+    $CURL_CMD -sLo /usr/bin/install-smallstep \
          "https://raw.githubusercontent.com/revolution-robotics/roadrunner-debian/debian_bullseye_rr01/revo/resources/smallstep/install-smallstep"
-    curl -sLo /usr/bin/bootstrap-smallstep \
+    $CURL_CMD -sLo /usr/bin/bootstrap-smallstep \
          "https://raw.githubusercontent.com/revolution-robotics/roadrunner-debian/debian_bullseye_rr01/revo/resources/smallstep/bootstrap-smallstep"
-    chmod +x /usr/bin/install-smallstep
-    chmod +x /usr/bin/bootstrap-smallstep
+    $CHMOD_CMD +x /usr/bin/install-smallstep
+    $CHMOD_CMD +x /usr/bin/bootstrap-smallstep
     echo "Installing smallstep..." >&2
-    useradd -m -s /bin/bash -c 'REVO Admin' revo
+    $USERADD_CMD -m -s $BASH_CMD -c 'REVO Admin' revo
     printf 'revo\tALL=(ALL) NOPASSWD: ALL\n' >/etc/sudoers.d/revo
-    chmod 0660 /etc/sudoers.d/revo
+    $CHMOD_CMD 0660 /etc/sudoers.d/revo
     bootstrap-smallstep
 
-    curl -sL https://ftp-master.debian.org/keys/release-11.asc |
-        gpg --import --no-default-keyring \
+    $CURL_CMD -sL https://ftp-master.debian.org/keys/release-11.asc |
+        $GPG_CMD --import --no-default-keyring \
              --keyring /usr/share/keyrings/debian-bullseye-release.gpg
 
-    rm -f "$policy" "$proxy"
+    $RM_CMD -f "$policy" "$proxy"
     trap - 0 1 2 15 RETURN
 }
 
@@ -313,15 +327,17 @@ reset-window-title ()
 }
 
 if test ."$0" = ."${BASH_SOURCE[0]}"; then
-    declare script=$($READLINK_CMD -e "$0")
+    declare script=''
+    declare script_dir=''
+    declare script_name=''
+
+    script=$(resolve-existing "$0")
+    script_name=${script##*/}
+    script_dir=${script%/*}
 
     declare client=${1:-'UD'}
     declare machine=${2:-'revo-roadrunner-mx7'}
     declare distribution=${3:-'debian'}
-
-
-    declare script_name=${script##*/}
-    declare script_dir=${script%/*}
 
     source /etc/os-release
 
@@ -329,7 +345,7 @@ if test ."$0" = ."${BASH_SOURCE[0]}"; then
         debian|ubuntu) enable-qemu-arm || exit $? ;;
     esac
 
-    load-configuration "${script_dir}/generate-hybrid-image.conf" || exit $?
+    load-configuration "${script_dir}/build-hybrid-image.conf" || exit $?
 
     declare builder_id=''
 

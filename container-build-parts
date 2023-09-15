@@ -14,6 +14,16 @@
 : ${SUDO_CMD:='/usr/bin/sudo'}
 : ${ZFS_CMD:='/sbin/zfs'}
 
+# OS-agnstoic readlink for existent files/directories.
+resolve-existing ()
+{
+    if $READLINK_CMD --version 2>&1 | $GREP_CMD -q 'coreutils'; then
+        $READLINK_CMD -e -- "$@"
+    else
+        $READLINK_CMD -f N "$@"
+    fi
+}
+
 create-external-volume ()
 {
     local build_products_dir=$1
@@ -87,9 +97,13 @@ run-builder ()
 }
 
 if test ."$0" = ."${BASH_SOURCE[0]}"; then
-    declare script=$($READLINK_CMD -e "$0")
-    declare script_dir=${script%/*}
-    declare script_name=${script##*/}
+    declare script=''
+    declare script_dir=''
+    declare script_name=''
+
+    script=$(resolve-existing "$0") || exit $?
+    script_dir=${script%/*}
+    script_name=${script##*/}
 
     source "${script_dir}/build-builder-image"
 
@@ -105,7 +119,7 @@ if test ."$0" = ."${BASH_SOURCE[0]}"; then
         debian|ubuntu) enable-qemu-arm || exit $? ;;
     esac
 
-    load-configuration "${script_dir}/generate-hybrid-image.conf" || exit $?
+    load-configuration "${script_dir}/build-hybrid-image.conf" || exit $?
 
     declare builder_id=''
 
@@ -136,8 +150,7 @@ Destination: ${dest_dir}
 EOF
     read -p 'Press any key to continue...'
 
-    run-builder "$builder_name" "$dest_dir" "$mount_dir" || exit 4
-
+    run-builder "$builder_name" "$dest_dir" "$mount_dir" || exit $?
     reset-window-title
 
     trap - 0 1 2 15

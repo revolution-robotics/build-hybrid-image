@@ -8,8 +8,9 @@
 : ${CAT_CMD:='/bin/cat'}
 : ${CURL_CMD:='/usr/bin/curl'}
 : ${CHMOD_CMD:='/bin/chmod'}
-: ${GPG_CMD:='/usr/bin/gpg'}
 : ${GIT_CMD:='/usr/bin/git'}
+: ${GPG_CMD:='/usr/bin/gpg'}
+: ${GREP_CMD:='/usr/bin/grep'}
 : ${MKDIR_CMD:='/bin/mkdir'}
 : ${READLINK_CMD:='/bin/readlink'}
 : ${TEE_CMD:='/usr/bin/tee'}
@@ -23,6 +24,16 @@
 : ${SIGNING_KEY:="@SIGNING_KEY@"}
 : ${HOST_GW_IPV4:='@GW_IPV4@'}
 : ${DEBIAN_PROXY:="-p http://${HOST_GW_IPV4}:3142/deb.debian.org/debian"}
+
+# OS-agnstoic readlink for existent files/directories.
+resolve-existing ()
+{
+    if $READLINK_CMD --version 2>&1 | $GREP_CMD -q 'coreutils'; then
+        $READLINK_CMD -e -- "$@"
+    else
+        $READLINK_CMD -f N "$@"
+    fi
+}
 
 install-prerequisites ()
 {
@@ -105,9 +116,13 @@ build-parts ()
 }
 
 if test ."$0" = ."${BASH_SOURCE[0]}"; then
-    declare script=$($READLINK_CMD -e $0)
-    declare script_name=${script##*/}
-    declare script_dir=${script%/*}
+    declare script=''
+    declare script_name=''
+    declare script_dir=''
+
+    script=$(resolve-existing "$0") || exit $?
+    script_name=${script##*/}
+    script_dir=${script%/*}
 
     declare build_suite_commit=$1
 
