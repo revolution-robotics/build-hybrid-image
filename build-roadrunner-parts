@@ -68,7 +68,10 @@ EOF
     $CURL_CMD -sLo /usr/bin/bootstrap-smallstep \
          "https://raw.githubusercontent.com/revolution-robotics/roadrunner-debian/debian_bullseye_rr01/revo/resources/smallstep/bootstrap-smallstep"
     $CHMOD_CMD +x /usr/bin/bootstrap-smallstep
-    bootstrap-smallstep
+    case $($UNAME_CMD -m) in
+        armv7l|aarch64|arm64) bootstrap-smallstep ;;
+        amd64|x86_64) $SUDO_CMD install-smallstep ;;
+    esac
 
     $CURL_CMD -sL https://ftp-master.debian.org/keys/release-11.asc |
         $GPG_CMD --import --no-default-keyring \

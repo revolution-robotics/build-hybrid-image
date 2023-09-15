@@ -221,6 +221,7 @@ EOF
 : ${GPG_CMD:='/usr/bin/gpg'}
 : ${RM_CMD:='/bin/rm'}
 : ${USERADD_CMD:='/usr/sbin/useradd'}
+: ${UNAME_CMD:='/bin/uname'}
 
 install-packages ()
 {
@@ -246,7 +247,7 @@ Acquire::http::Proxy "http://${HOST_GW_IPV4}:3142";
 EOF
     fi
 
-    DEBIAN_FRONTEND=noninteractive $APT_CMD -qy install autoconf automake          \
+    DEBIAN_FRONTEND=noninteractive $APT_CMD -qy install autoconf automake     \
         autopoint bc binfmt-support binutils bison build-essential            \
         cmake coreutils debootstrap device-tree-compiler devscripts           \
         dpkg-dev ed fakeroot flex g++ gcc gettext git gpg groff               \
@@ -271,13 +272,17 @@ EOF
     $USERADD_CMD -m -s $BASH_CMD -c 'REVO Admin' revo
     printf 'revo\tALL=(ALL) NOPASSWD: ALL\n' >/etc/sudoers.d/revo
     $CHMOD_CMD 0660 /etc/sudoers.d/revo
-    bootstrap-smallstep
+
+    case $($UNAME_CMD -m) in
+        armv7l|aarch64|arm64) bootstrap-smallstep ;;
+        amd64|x86_64) install-smallstep ;;
+    esac
 
     $CURL_CMD -sL https://ftp-master.debian.org/keys/release-11.asc |
         $GPG_CMD --import --no-default-keyring \
              --keyring /usr/share/keyrings/debian-bullseye-release.gpg
-
     $RM_CMD -f "$policy" "$proxy"
+
     trap - 0 1 2 15 RETURN
 }
 
