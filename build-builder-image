@@ -275,7 +275,7 @@ EOF
 
     case $($UNAME_CMD -m) in
         armv7l|aarch64|arm64) bootstrap-smallstep ;;
-        amd64|x86_64) install-smallstep ;;
+        amd64|x86_64) $SUDO_CMD install-smallstep ;;
     esac
 
     $CURL_CMD -sL https://ftp-master.debian.org/keys/release-11.asc |

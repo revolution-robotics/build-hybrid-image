@@ -10,7 +10,7 @@
 : ${CHMOD_CMD:='/bin/chmod'}
 : ${GIT_CMD:='/usr/bin/git'}
 : ${GPG_CMD:='/usr/bin/gpg'}
-: ${GREP_CMD:='/usr/bin/grep'}
+: ${GREP_CMD:='/bin/grep'}
 : ${MKDIR_CMD:='/bin/mkdir'}
 : ${READLINK_CMD:='/bin/readlink'}
 : ${TEE_CMD:='/usr/bin/tee'}

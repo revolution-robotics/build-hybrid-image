@@ -70,12 +70,12 @@ get-compression-specs ()
 
     case $($FILE_CMD "$image" | $SED_CMD -E -e 's/^[^:]+: //') in
         *bzip2*) compression_specs=( "$BZIP2_CMD -dc"  '.bz2' ) ;;
-        *lzip*) compression_specs=( "$LZIP_CMD -dc" '.lz' ) ;;
-        *LZMA*) compression_specs=( "$LZMA_CMD -dc" '.lzma' ) ;;
-        *lzop*) compression_specs=( "$LZOP_CMD -dc" '.lzo') ;;
-        *gzip*) compression_specs=( "$GZIP_CMD -dc" '.gz' ) ;;
-        *XZ*) compression_specs=( "$XZ_CMD -dc" '.xz' ) ;;
-        *Zip*) compression_specs=( "$UNZIP_CMD -p" '.zip' ) ;;
+        *gzip*)  compression_specs=( "$GZIP_CMD -dc" '.gz' ) ;;
+        *lzip*)  compression_specs=( "$LZIP_CMD -dc" '.lz' ) ;;
+        *LZMA*)  compression_specs=( "$LZMA_CMD -dc" '.lzma' ) ;;
+        *lzop*)  compression_specs=( "$LZOP_CMD -dc" '.lzo') ;;
+        *XZ*)    compression_specs=( "$XZ_CMD -dc" '.xz' ) ;;
+        *Zip*)   compression_specs=( "$UNZIP_CMD -p" '.zip' ) ;;
         *Zstandard*) compression_specs=( "$ZSTD_CMD -dc" '.zst' ) ;;
         *'ISO 9660'*|*'DOS/MBR boot sector'*)
             compression_specs=( "$CAT_CMD" '' ) ;;
@@ -83,8 +83,8 @@ get-compression-specs ()
     esac
 
     if test ."${compression_specs[0]}" = .'unknown'; then
-        pr-error "${image}: Unrecognized image."
-        return 10
+        echo "${FUNCNAME[0]}: ${image}: Unrecognized image." >&2
+        return 1
     fi
 }
 
@@ -93,17 +93,48 @@ backup-image ()
     local -n image=$1
     local -n specs=$2
 
-    get-compression-specs "$image" specs || return $?
 
-    local decompressed_image=''
+    if test ! -f "$image"; then
+        case "${image##*.}" in
+            bz2)  specs=( "$BZIP2_CMD -dc"  '.bz2' ) ;;
+            gz)   specs=( "$GZIP_CMD -dc" '.gz' ) ;;
+            lz)   specs=( "$LZIP_CMD -dc" '.lz' ) ;;
+            lzma) specs=( "$LZMA_CMD -dc" '.lzma' ) ;;
+            lzo)  specs=( "$LZOP_CMD -dc" '.lzo') ;;
+            xz)   specs=( "$XZ_CMD -dc" '.xz' ) ;;
+            zip)  specs=( "$UNZIP_CMD -p" '.zip' ) ;;
+            zst)  specs=( "$ZSTD_CMD -dc" '.zst' ) ;;
+        esac
 
-    if test ."${specs[0]}" != ."$CAT_CMD"; then
-        decompressed_image=${image%${specs[1]}}
-        ${specs[0]} "$image" >"$decompressed_image" || return $?
+        if test ."${specs[0]}" != .''; then
+            decompressed_image=${image%${specs[1]}}
+        else
+            specs=( "$GZIP_CMD -dc" '.gz' )
+            decompressed_image=$image
+            image+=${specs[1]}
+        fi
     else
-        specs=( "$GZIP_CMD -cd" '.gz' )
-        decompressed_image=$image
-        image+=${specs[1]}
+        get-compression-specs "$image" specs || return $?
+
+        local decompressed_image=''
+
+        if test ."${specs[0]}" != ."$CAT_CMD"; then
+            decompressed_image=${image%${specs[1]}}
+
+            if test ! -f "$decompressed_image"; then
+                echo "${FUNCNAME[0]}: ${image}: Decompressing..." >&2
+
+                trap '$RM_CMD -f "$decompressed_image"; exit' 0 1 2 15
+
+                ${specs[0]} "$image" >"$decompressed_image" || return $?
+
+                trap - 0 1 2 15
+            fi
+        else
+            specs=( "$GZIP_CMD -cd" '.gz' )
+            decompressed_image=$image
+            image+=${specs[1]}
+        fi
     fi
 
     if test -f "$decompressed_image"; then
@@ -134,7 +165,16 @@ allocate-image ()
 
     if test ."${src_specs[0]}" != ."$CAT_CMD"; then
         decompressed_image=${src_image%${src_specs[1]}}
-        ${src_specs[0]} "$src_image" >"$decompressed_image" || return $?
+
+        if test ! -f "$decompressed_image"; then
+            echo "${FUNCNAME[0]}: ${src_image}: Decompressing..." >&2
+
+            trap '$RM_CMD -f "$decompressed_image"; exit' 0 1 2 15
+
+            ${src_specs[0]} "$src_image" >"$decompressed_image" || return $?
+
+            trap - 0 1 2 15
+        fi
     else
         decompressed_image=$src_image
     fi
@@ -270,7 +310,7 @@ replace-devicetree ()
     $SUDO_CMD $CP_CMD "${parts_dir}/"*.dtb "${root_mount_point}/" || return $?
 
     $SUDO_CMD $RM_CMD -f "${root_mount_point}/"*.scr || return $?
-    $SUDO_CMD $CP_CMD "${parts_dir}/"*.scr "${root_mount_point}/" || return $?
+    $SUDO_CMD $CP_CMD "${parts_dir}/boot.scr" "${root_mount_point}/" || return $?
 }
 
 bmap-and-compress ()
