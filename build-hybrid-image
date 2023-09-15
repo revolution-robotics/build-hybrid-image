@@ -12,6 +12,7 @@
 : ${CAT_CMD:='/bin/cat'}
 : ${CP_CMD:='/bin/cp'}
 : ${DD_CMD:='/bin/dd'}
+: ${FILE_CMD:='/usr/bin/file'}
 : ${GZIP_CMD:='/usr/bin/gzip'}
 : ${GREP_CMD:='/usr/bin/grep'}
 : ${HEAD_CMD:='/usr/bin/head'}
@@ -27,6 +28,7 @@
 : ${PARTPROBE_CMD:='/sbin/partprobe'}
 : ${READLINK_CMD:='/bin/readlink'}
 : ${RM_CMD:='/bin/rm'}
+: ${SED_CMD:='/bin/sed'}
 : ${SFDISK_CMD:='/sbin/sfdisk'}
 : ${SLEEP_CMD:='/bin/sleep'}
 : ${SORT_CMD:='/usr/bin/sort'}
@@ -34,6 +36,8 @@
 : ${SUDO_CMD:='/usr/bin/sudo'}
 : ${TAR_CMD:='/bin/tar'}
 : ${UMOUNT_IMAGE_CMD:="${HOME}/bin/umount.image"}
+: ${XZ_CMD:='/usr/bin/xz'}
+: ${ZSTD_CMD:='/usr/bin/zstd'}
 
 # OS-agnstoic readlink for existent files/directories.
 resolve-existing ()
@@ -59,32 +63,88 @@ next-free-path ()
     echo "$next"
 }
 
-backup-image ()
+get-compression-specs ()
 {
     local image=$1
+    local -n compression_specs=$2
+
+    case $($FILE_CMD "$image" | $SED_CMD -E -e 's/^[^:]+: //') in
+        *bzip2*) compression_specs=( "$BZIP2_CMD -dc"  '.bz2' ) ;;
+        *lzip*) compression_specs=( "$LZIP_CMD -dc" '.lz' ) ;;
+        *LZMA*) compression_specs=( "$LZMA_CMD -dc" '.lzma' ) ;;
+        *lzop*) compression_specs=( "$LZOP_CMD -dc" '.lzo') ;;
+        *gzip*) compression_specs=( "$GZIP_CMD -dc" '.gz' ) ;;
+        *XZ*) compression_specs=( "$XZ_CMD -dc" '.xz' ) ;;
+        *Zip*) compression_specs=( "$UNZIP_CMD -p" '.zip' ) ;;
+        *Zstandard*) compression_specs=( "$ZSTD_CMD -dc" '.zst' ) ;;
+        *'ISO 9660'*|*'DOS/MBR boot sector'*)
+            compression_specs=( "$CAT_CMD" '' ) ;;
+        *) compression_specs=( 'unknown' 'unknown' ) ;;
+    esac
+
+    if test ."${compression_specs[0]}" = .'unknown'; then
+        pr-error "${image}: Unrecognized image."
+        return 10
+    fi
+}
+
+backup-image ()
+{
+    local -n image=$1
+    local -n specs=$2
+
+    get-compression-specs "$image" specs || return $?
+
+    local decompressed_image=''
+
+    if test ."${specs[0]}" != ."$CAT_CMD"; then
+        decompressed_image=${image%${specs[1]}}
+        ${specs[0]} "$image" >"$decompressed_image" || return $?
+    else
+        specs=( "$GZIP_CMD -cd" '.gz' )
+        decompressed_image=$image
+        image+=${specs[1]}
+    fi
+
+    if test -f "$decompressed_image"; then
+        $MV_CMD -f "$decompressed_image"{,.old} || return $?
+    fi
+
+    if test -f "${decompressed_image}.bmap"; then
+        $MV_CMD -f "${decompressed_image}.bmap"{,.old} || return $?
+    fi
 
     if test -f "$image"; then
         $MV_CMD -f "$image"{,.old} || return $?
     fi
 
-    if test -f "${image}.bmap"; then
-        $MV_CMD -f "${image}.bmap"{,.old} || return $?
-    fi
-
-    if test -f "${image}.gz"; then
-        $MV_CMD -f "${image}.gz"{,.old} || return $?
-    fi
+    image=$decompressed_image
 }
 
 allocate-image ()
 {
     local dest_image=$1
-    local src_image=$2
+    local -n src_image=$2
+
+    local -a src_specs=()
+
+    get-compression-specs "$src_image" src_specs || return $?
+
+    local decompressed_image=''
+
+    if test ."${src_specs[0]}" != ."$CAT_CMD"; then
+        decompressed_image=${src_image%${src_specs[1]}}
+        ${src_specs[0]} "$src_image" >"$decompressed_image" || return $?
+    else
+        decompressed_image=$src_image
+    fi
 
     local -i src_size=0
 
-    src_size=$($STAT_CMD --format=%s "$src_image") || return $?
+    src_size=$($STAT_CMD --format=%s "$decompressed_image") || return $?
     $DD_CMD if=/dev/zero of="$dest_image" bs="$src_size" seek=1 count=0 || return $?
+
+    src_image=$decompressed_image
 }
 
 duplicate-partition-table ()
@@ -216,9 +276,10 @@ replace-devicetree ()
 bmap-and-compress ()
 {
     local image=$1
+    local -n specs=$2
 
     $BMAPTOOL_CMD create -o "${image}.bmap" "${image}" || return $?
-    $GZIP_CMD -c "${image}" >"${image}.gz"
+    ${specs[0]%% *} -c "${image}" >"${image}${specs[1]}" || return $?
 }
 
 clean-up ()
@@ -252,19 +313,21 @@ if test ."$0" = ."${BASH_SOURCE[0]}"; then
     declare -a partition_nos=( {1..3} {5..7} )
 
     declare -a hybrid_mount_points=()
-    declare -a miw_mount_points=()
+    declare -a existing_mount_points=()
+    declare -a hybrid_specs=()
+    declare -a existing_specs=()
 
-    backup-image "$hybrid_img"
-    allocate-image "$hybrid_img" "$miw_img" || exit $?
-    duplicate-partition-table "$miw_img" "$hybrid_img" || exit $?
+    backup-image hybrid_img hybrid_specs
+    allocate-image "$hybrid_img" existing_img || exit $?
+    duplicate-partition-table "$existing_img" "$hybrid_img" || exit $?
     loop_device=$(loop-attach-image "$hybrid_img") || exit $?
 
-    trap '$UMOUNT_IMAGE_CMD "$hybrid_img" "$miw_img"; exit' 0 1 2 15
+    trap '$UMOUNT_IMAGE_CMD "$hybrid_img" "$existing_img"; exit' 0 1 2 15
 
     format-and-mount-device "$loop_device" hybrid_mount_points \
                             partition_nos partition_labels || exit $?
-    mount-image "$miw_img" miw_mount_points || exit $?
-    copy-file-systems miw_mount_points hybrid_mount_points || exit $?
+    mount-image "$existing_img" existing_mount_points || exit $?
+    copy-file-systems existing_mount_points hybrid_mount_points || exit $?
     zimage-to-uimage hybrid_mount_points || exit $?
     "${script_dir}/container-build-parts" || exit $?
 
@@ -277,8 +340,8 @@ if test ."$0" = ."${BASH_SOURCE[0]}"; then
                       ) || exit $?
     add-boot-blocks "$loop_device" "$parts_dir" || exit $?
     replace-devicetree "${hybrid_mount_points[0]}" "$parts_dir" || exit $?
-    bmap-and-compress "$hybrid_img" || exit $?
-    clean-up  "$hybrid_img" "$miw_img"
+    bmap-and-compress "$hybrid_img" hybrid_specs || exit $?
+    clean-up  "$hybrid_img" "$existing_img"
 
     trap - 0 1 2 15
 fi
