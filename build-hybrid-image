@@ -19,8 +19,8 @@
 : ${LOSETUP_CMD:='/sbin/losetup'}
 : ${LS_CMD:='/bin/ls'}
 : ${MKDIR_CMD:='/bin/mkdir'}
-: ${MKFS_VFAT_CMD:='/sbin/mkfs.vfat'}
-: ${MKFS_EXT4_CMD:='/sbin/mkfs.ext4'}
+: ${MKFS_FAT_CMD:='/sbin/mkfs.fat'}
+: ${MKE2FS_CMD:='/sbin/mke2fs'}
 : ${MKIMAGE_CMD:='/usr/bin/mkimage'}
 : ${MOUNT_CMD:='/sbin/mount'}
 : ${MOUNT_IMAGE_CMD:="${HOME}/bin/mount.image"}
@@ -237,8 +237,13 @@ format-and-mount-device ()
             return 1
         fi
         case $i in
-            1) format_cmd="$MKFS_VFAT_CMD -n" ;;
-            *) format_cmd="$MKFS_EXT4_CMD -L" ;;
+            1) format_cmd="$MKFS_FAT_CMD -n" ;;
+            *) if test -f /etc/mke2fs.conf && grep -Eq orphan_file /etc/mke2fs.conf; then
+                   format_cmd="$MKE2FS_CMD -t ext4 -O ^orphan_file -L"
+               else
+                   format_cmd="$MKE2FS_CMD -t ext4 -L"
+               fi
+               ;;
         esac
 
         $SUDO_CMD $format_cmd  "${_partition_labels[i - 1]}" "${loop_device}p${i}" || return $?
