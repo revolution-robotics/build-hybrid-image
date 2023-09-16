@@ -34,6 +34,7 @@
 : ${SORT_CMD:='/usr/bin/sort'}
 : ${STAT_CMD:='/usr/bin/stat'}
 : ${SUDO_CMD:='/usr/bin/sudo'}
+: ${SYNC_CMD:='/bin/sync'}
 : ${TAR_CMD:='/bin/tar'}
 : ${UMOUNT_IMAGE_CMD:="${HOME}/bin/umount.image"}
 : ${XZ_CMD:='/usr/bin/xz'}
@@ -313,23 +314,19 @@ replace-devicetree ()
     $SUDO_CMD $CP_CMD "${parts_dir}/boot.scr" "${root_mount_point}/" || return $?
 }
 
-bmap-and-compress ()
-{
-    local image=$1
-    local -n specs=$2
-
-    $BMAPTOOL_CMD create -o "${image}.bmap" "${image}" || return $?
-    ${specs[0]%% *} -c "${image}" >"${image}${specs[1]}" || return $?
-}
-
 clean-up ()
 {
-    local image1=$1
-    local image2=$2
+    local src_image=$1
+    local dest_image=$2
+    local -n dest_specs=$3
 
-    $UMOUNT_IMAGE_CMD "$image1" || true
-    $UMOUNT_IMAGE_CMD "$image2"
+    $SYNC_CMD
+    $UMOUNT_IMAGE_CMD "$src_image" || return $?
+    $UMOUNT_IMAGE_CMD "$dest_image" || return $?
+    $BMAPTOOL_CMD create -o "${dest_image}.bmap" "${dest_image}" || return $?
+    ${dest_specs[0]%% *} -c "${dest_image}" >"${dest_image}${dest_specs[1]}" || return $?
 }
+
 
 if test ."$0" = ."${BASH_SOURCE[0]}"; then
     set -o pipefail
@@ -380,8 +377,7 @@ if test ."$0" = ."${BASH_SOURCE[0]}"; then
                       ) || exit $?
     add-boot-blocks "$loop_device" "$parts_dir" || exit $?
     replace-devicetree "${hybrid_mount_points[0]}" "$parts_dir" || exit $?
-    bmap-and-compress "$hybrid_img" hybrid_specs || exit $?
-    clean-up  "$hybrid_img" "$existing_img"
+    clean-up "$existing_img" "$hybrid_img" hybrid_specs
 
     trap - 0 1 2 15
 fi
