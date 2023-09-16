@@ -36,6 +36,7 @@
 : ${SUDO_CMD:='/usr/bin/sudo'}
 : ${SYNC_CMD:='/bin/sync'}
 : ${TAR_CMD:='/bin/tar'}
+: ${TEE_CMD:='/usr/bin/tee'}
 : ${UMOUNT_IMAGE_CMD:="${HOME}/bin/umount.image"}
 : ${XZ_CMD:='/usr/bin/xz'}
 : ${ZSTD_CMD:='/usr/bin/zstd'}
@@ -276,6 +277,19 @@ copy-file-systems ()
     done
 }
 
+fix-systemd-networkd ()
+{
+    local -n destination_mount_points=$1
+
+    local systemd_networkd_dir=${destination_mount_points[1]}/etc/systemd/system/systemd-networkd.service.d
+
+    $SUDO_CMD $MKDIR_CMD -p "$systemd_networkd_dir" || return $?
+    $SUDO_CMD $TEE_CMD "${systemd_networkd_dir}/override.conf" >/dev/null <<EOF
+[Service]
+ExecStartPre=/sbin/ip link set dev eth1 down ; /sbin/ip link set dev eth0 up ; /sbin/ip link set dev eth1 up
+EOF
+}
+
 zimage-to-uimage ()
 {
     local -n mount_points=$1
@@ -370,6 +384,7 @@ if test ."$0" = ."${BASH_SOURCE[0]}"; then
                             partition_nos partition_labels || exit $?
     mount-image "$existing_img" existing_mount_points || exit $?
     copy-file-systems existing_mount_points hybrid_mount_points || exit $?
+    fix-systemd-networkd hybrid_mount_points || exit $?
     zimage-to-uimage hybrid_mount_points || exit $?
     "${script_dir}/container-build-parts" || exit $?
 
