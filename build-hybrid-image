@@ -257,11 +257,11 @@ format-and-mount-device ()
 
 mount-image ()
 {
-    local image=$1
-    local -n mount_points=$2
+    local args=$1
+    local image=$2
+    local -n mount_points=$3
 
-    $MOUNT_IMAGE_CMD "$image" |
-        mapfile -t mount_points || return $?
+    mapfile -t mount_points < <($MOUNT_IMAGE_CMD $args "$image")
 }
 
 copy-file-systems ()
@@ -340,7 +340,7 @@ clean-up ()
     local -n dest_specs=$3
 
     $SYNC_CMD
-    $UMOUNT_IMAGE_CMD "$src_image" || return $?
+    $UMOUNT_IMAGE_CMD --no-compress "$src_image" || return $?
     $UMOUNT_IMAGE_CMD "$dest_image" || return $?
     $BMAPTOOL_CMD create -o "${dest_image}.bmap" "${dest_image}" || return $?
     ${dest_specs[0]%% *} -c "${dest_image}" >"${dest_image}${dest_specs[1]}" || return $?
@@ -382,7 +382,7 @@ if test ."$0" = ."${BASH_SOURCE[0]}"; then
 
     format-and-mount-device "$loop_device" hybrid_mount_points \
                             partition_nos partition_labels || exit $?
-    mount-image "$existing_img" existing_mount_points || exit $?
+    mount-image --no-decompress "$existing_img" existing_mount_points || exit $?
     copy-file-systems existing_mount_points hybrid_mount_points || exit $?
     fix-systemd-networkd hybrid_mount_points || exit $?
     zimage-to-uimage hybrid_mount_points || exit $?
