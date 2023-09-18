@@ -16,6 +16,7 @@
 : ${GZIP_CMD:='/usr/bin/gzip'}
 : ${GREP_CMD:='/usr/bin/grep'}
 : ${HEAD_CMD:='/usr/bin/head'}
+: ${JQ_CMD:='/usr/bin/jq'}
 : ${LOSETUP_CMD:='/sbin/losetup'}
 : ${LS_CMD:='/bin/ls'}
 : ${MKDIR_CMD:='/bin/mkdir'}
@@ -51,20 +52,6 @@ resolve-existing ()
     fi
 }
 
-next-free-path ()
-{
-    local base=$1
-
-    local next=$base
-    local -i i=0
-
-    while test -e "$next"; do
-        next=${base}$(( ++i ))
-    done
-
-    echo "$next"
-}
-
 get-compression-specs ()
 {
     local image=$1
@@ -90,11 +77,26 @@ get-compression-specs ()
     fi
 }
 
+regex-escape ()
+{
+    local regex=$1
+
+    local escaped=''
+
+    if ! escaped=$($SED_CMD -e 's/[][/\*+.|$]/\\&/g'  <<<"$regex"); then
+        echo "${FUNCNAME[0]}: ${backing_image}: Escape failed." >&2
+        return 1
+    fi
+
+    echo "$escaped"
+}
+
 backup-image ()
 {
     local -n image=$1
     local -n specs=$2
 
+    local decompressed_image=''
 
     if test ! -f "$image"; then
         case "${image##*.}" in
@@ -107,36 +109,16 @@ backup-image ()
             zip)  specs=( "$UNZIP_CMD -p" '.zip' ) ;;
             zst)  specs=( "$ZSTD_CMD -dc" '.zst' ) ;;
         esac
-
-        if test ."${specs[0]}" != .''; then
-            decompressed_image=${image%${specs[1]}}
-        else
-            specs=( "$GZIP_CMD -dc" '.gz' )
-            decompressed_image=$image
-            image+=${specs[1]}
-        fi
     else
         get-compression-specs "$image" specs || return $?
+    fi
 
-        local decompressed_image=''
-
-        if test ."${specs[0]}" != ."$CAT_CMD"; then
-            decompressed_image=${image%${specs[1]}}
-
-            if test ! -f "$decompressed_image"; then
-                echo "${FUNCNAME[0]}: ${image}: Decompressing..." >&2
-
-                trap '$RM_CMD -f "$decompressed_image"; exit' 0 1 2 15
-
-                ${specs[0]} "$image" >"$decompressed_image" || return $?
-
-                trap - 0 1 2 15
-            fi
-        else
-            specs=( "$GZIP_CMD -cd" '.gz' )
-            decompressed_image=$image
-            image+=${specs[1]}
-        fi
+    if test ."${specs[0]}" != .''; then
+        decompressed_image=${image%${specs[1]}}
+    else
+        specs=( "$GZIP_CMD -dc" '.gz' )
+        decompressed_image=$image
+        image+=${specs[1]}
     fi
 
     if test -f "$decompressed_image"; then
@@ -154,105 +136,63 @@ backup-image ()
     image=$decompressed_image
 }
 
-allocate-image ()
+copy-image ()
 {
-    local dest_image=$1
-    local -n src_image=$2
+    local -n src_image=$1
+    local -n dest_image=$2
 
-    local -a src_specs=()
+    src_image=$(resolve-existing "$src_image") || return $?
+    get-compression-specs "$src_image" specs || return $?
 
-    get-compression-specs "$src_image" src_specs || return $?
+    local decompressed_src_image=''
 
-    local decompressed_image=''
+    if test ."${specs[0]}" != ."$CAT_CMD"; then
+        decompressed_src_image=${src_image%${specs[1]}}
 
-    if test ."${src_specs[0]}" != ."$CAT_CMD"; then
-        decompressed_image=${src_image%${src_specs[1]}}
+        if test ! -f "$decompressed_src_image"; then
+          n  echo "${FUNCNAME[0]}: ${src_image}: Decompressing..." >&2
 
-        if test ! -f "$decompressed_image"; then
-            echo "${FUNCNAME[0]}: ${src_image}: Decompressing..." >&2
+            trap '$RM_CMD -f "$decompressed_src_image"; exit' 0 1 2 15
 
-            trap '$RM_CMD -f "$decompressed_image"; exit' 0 1 2 15
-
-            ${src_specs[0]} "$src_image" >"$decompressed_image" || return $?
+            ${specs[0]} "$src_image" >"$decompressed_src_image" || return $?
 
             trap - 0 1 2 15
         fi
     else
-        decompressed_image=$src_image
+        specs=( "$GZIP_CMD -cd" '.gz' )
+        decompressed_src_image=$src_image
+        src_image+=${specs[1]}
     fi
 
-    local -i src_size=0
-
-    src_size=$($STAT_CMD --format=%s "$decompressed_image") || return $?
-    $DD_CMD if=/dev/zero of="$dest_image" bs="$src_size" seek=1 count=0 || return $?
-
-    src_image=$decompressed_image
+    $CP_CMD "$decompressed_src_image" "$dest_image" || return $?
+    dest_image=$(resolve-existing "$dest_image") || return $?
 }
 
-duplicate-partition-table ()
-{
-    local src_image=$1
-    local dest_image=$2
-
-    $SFDISK_CMD --dump "$src_image" |
-        $SFDISK_CMD --wipe=always "$dest_image" || return $?
-}
-
-loop-attach-image ()
+get-image-device ()
 {
     local image=$1
 
-    local loop_device=''
+    local -a devices=()
 
-    loop_device=$($SUDO_CMD $LOSETUP_CMD --nooverlap --find --show "$image") || return $?
-    $SUDO_CMD $PARTPROBE_CMD "$loop_device" || return $?
-    $SLEEP_CMD 2
+    mapfile -t devices < <(
+        $LOSETUP_CMD -lJ  |
+            $JQ_CMD -r '.loopdevices |
+                .[] |
+                select(
+                    ."back-file" |
+                     startswith("'"$image"'")
+                ) | .name'
+        )
 
-    echo "$loop_device"
-}
-
-format-and-mount-device ()
-{
-    local loop_device=$1
-    local -n _mount_points=$2
-    local -n _partition_nos=$3
-    local -n _partition_labels=$4
-
-    local image_mount_basedir=''
-
-    if test -d /run/media; then
-        image_mount_basedir=/run/media/$USER
-    else
-        image_mount_basedir=/media/$USER
+    if (( ${#devices[*]} > 1 )); then
+        echo "${FUNCNAME[0]}: ${image}: Ambiguous - use mount point instead." >&2
+        return 1
+    elif (( ${#devices[*]} < 1 )); then
+        echo "${FUNCNAME[0]}: ${image}: Not loop attached." >&2
+        return 2
     fi
 
-    local mount_point=''
-    local -i i=0
-
-    # Format and mount partitions
-    for i in ${_partition_nos[*]}; do
-        if test ! -e "${loop_device}p${i}"; then
-            echo "${loop_device}p${i}: No such file or directory" >&2
-            $SUDO_CMD $LOSETUP_CMD -d "$loop_device" || true
-            $RM_CMD -f "$hybrid_img"
-            return 1
-        fi
-        case $i in
-            1) format_cmd="$MKFS_FAT_CMD -n" ;;
-            *) if test -f /etc/mke2fs.conf && grep -Eq orphan_file /etc/mke2fs.conf; then
-                   format_cmd="$MKE2FS_CMD -t ext4 -O ^orphan_file -L"
-               else
-                   format_cmd="$MKE2FS_CMD -t ext4 -L"
-               fi
-               ;;
-        esac
-
-        $SUDO_CMD $format_cmd  "${_partition_labels[i - 1]}" "${loop_device}p${i}" || return $?
-        mount_point=$(next-free-path "${image_mount_basedir}/${_partition_labels[i - 1]}")
-        $SUDO_CMD $MKDIR_CMD -p "$mount_point" || return $?
-        $SUDO_CMD $MOUNT_CMD "${loop_device}p${i}" "$mount_point" || return $?
-        _mount_points+=( "$mount_point" )
-    done
+    echo "${devices[0]}"
 }
 
 mount-image ()
@@ -264,30 +204,16 @@ mount-image ()
     mapfile -t mount_points < <($MOUNT_IMAGE_CMD $args "$image")
 }
 
-copy-file-systems ()
+replace-devicetree ()
 {
-    local -n source_mount_points=$1
-    local -n destination_mount_points=$2
+    local root_mount_point=$1
+    local parts_dir=$2
 
-    local -i i=0
+    $SUDO_CMD $RM_CMD -f "${root_mount_point}/"*.dtb || return $?
+    $SUDO_CMD $CP_CMD "${parts_dir}/"*.dtb "${root_mount_point}/" || return $?
 
-    for i in ${!source_mount_points[*]}; do
-        $SUDO_CMD $TAR_CMD -C "${source_mount_points[i]}" -cf - . |
-            $SUDO_CMD $TAR_CMD -C "${destination_mount_points[i]}" -xf -
-    done
-}
-
-fix-systemd-networkd ()
-{
-    local -n destination_mount_points=$1
-
-    local systemd_networkd_dir=${destination_mount_points[1]}/etc/systemd/system/systemd-networkd.service.d
-
-    $SUDO_CMD $MKDIR_CMD -p "$systemd_networkd_dir" || return $?
-    $SUDO_CMD $TEE_CMD "${systemd_networkd_dir}/override.conf" >/dev/null <<EOF
-[Service]
-ExecStartPre=/sbin/ip link set dev eth1 down ; /sbin/ip link set dev eth0 up ; /sbin/ip link set dev eth1 up
-EOF
+    $SUDO_CMD $RM_CMD -f "${root_mount_point}/"*.scr || return $?
+    $SUDO_CMD $CP_CMD "${parts_dir}/boot.scr" "${root_mount_point}/" || return $?
 }
 
 zimage-to-uimage ()
@@ -321,16 +247,17 @@ add-boot-blocks ()
     $SUDO_CMD $DD_CMD if="$uboot_mmc" of="$loop_device" bs=1K seek=69 || return $?
 }
 
-replace-devicetree ()
+fix-systemd-networkd ()
 {
-    local root_mount_point=$1
-    local parts_dir=$2
+    local -n destination_mount_points=$1
 
-    $SUDO_CMD $RM_CMD -f "${root_mount_point}/"*.dtb || return $?
-    $SUDO_CMD $CP_CMD "${parts_dir}/"*.dtb "${root_mount_point}/" || return $?
+    local systemd_networkd_dir=${destination_mount_points[1]}/etc/systemd/system/systemd-networkd.service.d
 
-    $SUDO_CMD $RM_CMD -f "${root_mount_point}/"*.scr || return $?
-    $SUDO_CMD $CP_CMD "${parts_dir}/boot.scr" "${root_mount_point}/" || return $?
+    $SUDO_CMD $MKDIR_CMD -p "$systemd_networkd_dir" || return $?
+    $SUDO_CMD $TEE_CMD "${systemd_networkd_dir}/override.conf" >/dev/null <<EOF
+[Service]
+ExecStartPre=/sbin/ip link set dev eth1 down ; /sbin/ip link set dev eth0 up ; /sbin/ip link set dev eth1 up
+EOF
 }
 
 clean-up ()
@@ -339,7 +266,6 @@ clean-up ()
     local dest_image=$2
     local -n dest_specs=$3
 
-    $SYNC_CMD
     $UMOUNT_IMAGE_CMD --no-compress "$src_image" || return $?
     $UMOUNT_IMAGE_CMD "$dest_image" || return $?
     $BMAPTOOL_CMD create -o "${dest_image}.bmap" "${dest_image}" || return $?
@@ -371,21 +297,15 @@ if test ."$0" = ."${BASH_SOURCE[0]}"; then
     declare -a hybrid_mount_points=()
     declare -a existing_mount_points=()
     declare -a hybrid_specs=()
-    declare -a existing_specs=()
 
     backup-image hybrid_img hybrid_specs
-    allocate-image "$hybrid_img" existing_img || exit $?
-    duplicate-partition-table "$existing_img" "$hybrid_img" || exit $?
-    loop_device=$(loop-attach-image "$hybrid_img") || exit $?
+    copy-image existing_img hybrid_img
 
     trap '$UMOUNT_IMAGE_CMD "$hybrid_img" "$existing_img"; exit' 0 1 2 15
 
-    format-and-mount-device "$loop_device" hybrid_mount_points \
-                            partition_nos partition_labels || exit $?
+    mount-image ''  "$hybrid_img" hybrid_mount_points  || exit $?
     mount-image --no-decompress "$existing_img" existing_mount_points || exit $?
-    copy-file-systems existing_mount_points hybrid_mount_points || exit $?
-    fix-systemd-networkd hybrid_mount_points || exit $?
-    zimage-to-uimage hybrid_mount_points || exit $?
+    loop_device=$(get-image-device "$hybrid_img") || exit $?
     "${script_dir}/container-build-parts" || exit $?
 
     declare parts_dir=''
@@ -395,8 +315,10 @@ if test ."$0" = ."${BASH_SOURCE[0]}"; then
             $SORT_CMD -Vr |
             $HEAD_CMD -1
                       ) || exit $?
-    add-boot-blocks "$loop_device" "$parts_dir" || exit $?
     replace-devicetree "${hybrid_mount_points[0]}" "$parts_dir" || exit $?
+    zimage-to-uimage hybrid_mount_points || exit $?
+    add-boot-blocks "$loop_device" "$parts_dir" || exit $?
+    fix-systemd-networkd hybrid_mount_points || exit $?
     clean-up "$existing_img" "$hybrid_img" hybrid_specs
 
     trap - 0 1 2 15
