@@ -14,7 +14,7 @@
 : ${DD_CMD:='/bin/dd'}
 : ${FILE_CMD:='/usr/bin/file'}
 : ${GZIP_CMD:='/usr/bin/gzip'}
-: ${GREP_CMD:='/usr/bin/grep'}
+: ${GREP_CMD:='/bin/grep'}
 : ${HEAD_CMD:='/usr/bin/head'}
 : ${LOSETUP_CMD:='/sbin/losetup'}
 : ${LS_CMD:='/bin/ls'}

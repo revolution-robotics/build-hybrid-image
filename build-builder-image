@@ -12,7 +12,7 @@
 : ${CP_CMD:='/bin/cp'}
 : ${FINDMNT_CMD:='/bin/findmnt'}
 : ${GIT_CMD:='/usr/bin/git'}
-: ${GREP_CMD:='/usr/bin/grep'}
+: ${GREP_CMD:='/bin/grep'}
 : ${HEAD_CMD:='/usr/bin/head'}
 : ${INSTALL_CMD:='/usr/bin/install'}
 : ${IP_CMD:='/sbin/ip'}
